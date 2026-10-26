@@ -21,15 +21,14 @@ const saveData = (data) => fs.writeFileSync(DATA_FILE, JSON.stringify(data));
 // Главная страница
 app.get('/', (req, res) => {
     const data = getData();
-    
-    // Для старых баз данных добавляем пустой лог, если его нет
     if (!data.voteLog) data.voteLog = [];
 
     const totalVotes = data.candidates.reduce((s, c) => s + c.votes, 0);
     const maxVotes = data.candidates.length ? Math.max(...data.candidates.map(c => c.votes)) : 0;
     
     const cookies = req.headers.cookie || '';
-    const isAdmin = cookies.includes('admin=true');
+    // ЖЕЛЕЗОБЕТОННАЯ ПРОВЕРКА АДМИНА
+    const isAdmin = /(?:^|;\s*)admin=true/.test(cookies);
     
     const match = cookies.match(/userId=([^;]+)/);
     let userId = match ? match[1] : null;
@@ -47,7 +46,10 @@ app.get('/', (req, res) => {
         const percent = totalVotes ? Math.round((c.votes / totalVotes) * 100) : 0;
         
         let btnHtml = '';
-        if (!isRegistered) {
+        // Если это админ, он видит просто статистику, кнопок голосования ему не надо
+        if (isAdmin) {
+            btnHtml = `<div style="text-align:center; opacity:0.6; font-size:0.9rem; margin-top:10px;">(Режим админа)</div>`;
+        } else if (!isRegistered) {
             btnHtml = `<button class="btn-vote" disabled style="background:#888; opacity:0.7;">Сначала зарегистрируйся</button>`;
         } else if (hasVoted) {
             btnHtml = `<button class="btn-vote" disabled>✓ Голос отдан</button>`;
@@ -73,14 +75,14 @@ app.get('/', (req, res) => {
         </div>`;
     }).join('');
 
-    // Формируем список проголосовавших (только для админа)
+    // Список проголосовавших (только для админа)
     const voteLogHtml = data.voteLog.map(log => `
         <tr style="border-bottom: 1px solid rgba(255,255,255,0.1);">
             <td style="padding: 10px;">${log.voterName} <br><small style="opacity:0.7;">${log.voterGroup}</small></td>
             <td style="padding: 10px; color: #ffd700; font-weight: bold;">${log.candidateName}</td>
             <td style="padding: 10px; font-size: 0.85rem; opacity: 0.8;">${new Date(log.time).toLocaleString('ru-RU')}</td>
         </tr>
-    `).reverse().join(''); // Сначала новые
+    `).reverse().join(''); 
 
     res.send(`
     <!DOCTYPE html>
@@ -155,6 +157,7 @@ app.get('/', (req, res) => {
                 <div class="stat">🗳️ Всего голосов: <span>${totalVotes}</span></div>
             </div>
 
+            <!-- Панель обычного пользователя (только для не-админов) -->
             ${!isAdmin ? `
             <div class="user-panel">
                 ${isRegistered 
@@ -171,6 +174,7 @@ app.get('/', (req, res) => {
             </div>
             ` : ''}
             
+            <!-- Панель Админа -->
             ${isAdmin ? `
             <div class="admin-panels">
                 <div class="add-form">
@@ -209,6 +213,7 @@ app.get('/', (req, res) => {
                 ${candidatesHtml || '<div class="empty" style="grid-column:1/-1; text-align:center; padding:50px;">😴 Пока никого нет. Ждем кандидатов!</div>'}
             </div>
             
+            <!-- Кнопка входа для админа (только для обычных юзеров) -->
             ${!isAdmin ? `<a href="/login" class="admin-link">🔒 Вход для админа</a>` : ''}
         </div>
         <script>
@@ -235,7 +240,7 @@ app.post('/register', express.urlencoded({ extended: true }), (req, res) => {
     const match = cookies.match(/userId=([^;]+)/);
     const userId = match ? match[1] : null;
     
-    if (!userId) return res.redirect('/?msg=Ошибка сессии');
+    if (!userId) return res.redirect('/?msg=Ошибка сессии. Попробуйте обновить страницу.');
 
     data.users[userId] = {
         name: req.body.name.trim(),
@@ -246,11 +251,17 @@ app.post('/register', express.urlencoded({ extended: true }), (req, res) => {
     res.redirect('/?msg=' + encodeURIComponent('✅ Регистрация успешна!'));
 });
 
-// Голосование
+// Голосование (только для не-админов)
 app.post('/vote', express.urlencoded({ extended: true }), (req, res) => {
     const data = getData();
     const id = req.body.id;
     const cookies = req.headers.cookie || '';
+    
+    // Дополнительная защита: админ не может голосовать
+    if (/(?:^|;\s*)admin=true/.test(cookies)) {
+        return res.redirect('/?msg=' + encodeURIComponent('⚠️ Админ не может голосовать!'));
+    }
+
     const match = cookies.match(/userId=([^;]+)/);
     const userId = match ? match[1] : null;
     
@@ -260,6 +271,7 @@ app.post('/vote', express.urlencoded({ extended: true }), (req, res) => {
 
     const currentUser = data.users[userId];
 
+    // Защита от повторного голосования
     if (currentUser.hasVoted) {
         return res.redirect('/?msg=' + encodeURIComponent('⚠️ Вы уже голосовали! Можно только один раз.'));
     }
@@ -269,7 +281,8 @@ app.post('/vote', express.urlencoded({ extended: true }), (req, res) => {
         candidate.votes++;
         currentUser.hasVoted = true;
         
-        // Записываем в лог
+        // Записываем в лог для админа
+        if (!data.voteLog) data.voteLog = [];
         data.voteLog.push({
             voterName: currentUser.name,
             voterGroup: currentUser.group,
@@ -307,9 +320,12 @@ app.post('/login', express.urlencoded({ extended: true }), (req, res) => {
     }
 });
 
+// Добавление кандидата (ТОЛЬКО ДЛЯ АДМИНА)
 app.post('/add', upload.single('photo'), (req, res) => {
     const cookies = req.headers.cookie || '';
-    if (!cookies.includes('admin=true')) return res.send('Доступ запрещен. <a href="/">На главную</a>');
+    if (!/(?:^|;\s*)admin=true/.test(cookies)) {
+        return res.status(403).send('Доступ запрещен. <a href="/">На главную</a>');
+    }
 
     const data = getData();
     let photoBase64 = null;
