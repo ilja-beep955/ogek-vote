@@ -6,16 +6,14 @@ const path = require('path');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const DATA_FILE = 'data.json';
+const ADMIN_PASSWORD = 'admin123'; // ⚠️ ПАРОЛЬ ДЛЯ ДОБАВЛЕНИЯ (можешь изменить)
 
-// Загрузка фото в память
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 2 * 1024 * 1024 } });
 
-// Инициализация базы данных
 if (!fs.existsSync(DATA_FILE)) {
     fs.writeFileSync(DATA_FILE, JSON.stringify({ candidates: [], votedIps: [] }));
 }
 
-// Хелперы для чтения/записи
 const getData = () => JSON.parse(fs.readFileSync(DATA_FILE));
 const saveData = (data) => fs.writeFileSync(DATA_FILE, JSON.stringify(data));
 
@@ -25,6 +23,9 @@ app.get('/', (req, res) => {
     const totalVotes = data.candidates.reduce((s, c) => s + c.votes, 0);
     const maxVotes = data.candidates.length ? Math.max(...data.candidates.map(c => c.votes)) : 0;
     const userIp = req.ip;
+    
+    // Проверяем, ввел ли пользователь пароль (через cookie)
+    const isAdmin = req.headers.cookie && req.headers.cookie.includes('admin=true');
 
     const candidatesHtml = data.candidates.sort((a, b) => b.votes - a.votes).map(c => {
         const isWinner = c.votes === maxVotes && maxVotes > 0;
@@ -71,7 +72,7 @@ app.get('/', (req, res) => {
             .add-form { background: rgba(255,255,255,0.12); border-radius: 20px; padding: 20px; margin-bottom: 30px; backdrop-filter: blur(15px); border: 1px solid rgba(255,255,255,0.2); }
             .add-form h2 { text-align: center; margin-bottom: 15px; }
             .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px,1fr)); gap: 10px; margin-bottom: 10px; }
-            input[type=text], input[type=file] { width: 100%; padding: 12px; border-radius: 10px; border: 2px solid rgba(255,255,255,0.3); background: rgba(255,255,255,0.15); color: #fff; outline: none; }
+            input[type=text], input[type=file], input[type=password] { width: 100%; padding: 12px; border-radius: 10px; border: 2px solid rgba(255,255,255,0.3); background: rgba(255,255,255,0.15); color: #fff; outline: none; }
             input::placeholder { color: rgba(255,255,255,0.7); }
             input[type=file]::file-selector-button { background: #ffd700; color: #333; border: none; padding: 5px 10px; border-radius: 5px; cursor: pointer; margin-right: 8px; font-weight: bold; }
             .btn { padding: 14px 25px; border: none; border-radius: 10px; font-weight: bold; cursor: pointer; transition: 0.3s; text-transform: uppercase; font-size: 1rem; }
@@ -95,8 +96,10 @@ app.get('/', (req, res) => {
             .btn-vote:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 5px 15px rgba(0,200,83,0.4); }
             .btn-vote:disabled { background: #666; cursor: not-allowed; }
             .empty { text-align: center; padding: 50px; font-size: 1.2rem; opacity: 0.8; grid-column: 1/-1; }
-            .toast { position: fixed; top: 20px; right: 20px; padding: 15px 25px; background: #00c853; border-radius: 10px; font-weight: bold; box-shadow: 0 5px 20px rgba(0,0,0,0.3); transform: translateX(200%); transition: 0.4s; }
+            .toast { position: fixed; top: 20px; right: 20px; padding: 15px 25px; background: #00c853; border-radius: 10px; font-weight: bold; box-shadow: 0 5px 20px rgba(0,0,0,0.3); transform: translateX(200%); transition: 0.4s; z-index: 1000; }
             .toast.show { transform: translateX(0); }
+            .admin-link { display: block; text-align: center; margin-top: 40px; color: rgba(255,255,255,0.5); text-decoration: none; font-size: 0.9rem; cursor: pointer; }
+            .admin-link:hover { color: #fff; }
         </style>
     </head>
     <body>
@@ -107,8 +110,10 @@ app.get('/', (req, res) => {
                 <div class="stat">👥 Кандидатов: <span>${data.candidates.length}</span></div>
                 <div class="stat">🗳️ Всего голосов: <span>${totalVotes}</span></div>
             </div>
+            
+            ${isAdmin ? `
             <div class="add-form">
-                <h2>➕ Добавить кандидата</h2>
+                <h2>➕ Добавить кандидата (Админ)</h2>
                 <form method="POST" action="/add" enctype="multipart/form-data">
                     <div class="form-grid">
                         <input type="text" name="name" placeholder="ФИО кандидата" required>
@@ -118,9 +123,13 @@ app.get('/', (req, res) => {
                     <button type="submit" class="btn btn-primary">🚀 Добавить</button>
                 </form>
             </div>
+            ` : ''}
+
             <div class="candidates">
-                ${candidatesHtml || '<div class="empty">😴 Пока никого нет. Добавь первого кандидата!</div>'}
+                ${candidatesHtml || '<div class="empty">😴 Пока никого нет. Ждем кандидатов!</div>'}
             </div>
+            
+            ${!isAdmin ? `<a href="/login" class="admin-link">🔒 Вход для админа</a>` : ''}
         </div>
         <script>
             const params = new URLSearchParams(window.location.search);
@@ -139,8 +148,54 @@ app.get('/', (req, res) => {
     `);
 });
 
+// Страница входа для админа
+app.get('/login', (req, res) => {
+    res.send(`
+    <!DOCTYPE html>
+    <html lang="ru">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Вход</title>
+        <style>
+            body { font-family: 'Segoe UI', sans-serif; background: linear-gradient(135deg, #667eea, #764ba2); height: 100vh; display: flex; align-items: center; justify-content: center; color: #fff; }
+            .box { background: rgba(255,255,255,0.15); padding: 40px; border-radius: 20px; backdrop-filter: blur(10px); text-align: center; width: 300px; }
+            input { width: 100%; padding: 12px; margin-bottom: 15px; border-radius: 10px; border: none; background: rgba(255,255,255,0.2); color: #fff; font-size: 1rem; }
+            button { width: 100%; padding: 12px; border: none; border-radius: 10px; background: #ffd700; color: #333; font-weight: bold; cursor: pointer; font-size: 1rem; }
+            a { color: #ffd700; text-decoration: none; display: block; margin-top: 15px; font-size: 0.9rem; }
+        </style>
+    </head>
+    <body>
+        <div class="box">
+            <h2>Вход для админа</h2>
+            <form method="POST" action="/login">
+                <input type="password" name="password" placeholder="Пароль" required>
+                <button type="submit">Войти</button>
+            </form>
+            <a href="/">← На главную</a>
+        </div>
+    </body>
+    </html>
+    `);
+});
+
+// Обработка логина
+app.post('/login', express.urlencoded({ extended: true }), (req, res) => {
+    if (req.body.password === ADMIN_PASSWORD) {
+        res.setHeader('Set-Cookie', 'admin=true; Path=/; Max-Age=86400'); // Кука на 24 часа
+        res.redirect('/');
+    } else {
+        res.send('Неверный пароль. <a href="/login">Назад</a>');
+    }
+});
+
 // Добавление кандидата
 app.post('/add', upload.single('photo'), (req, res) => {
+    const isAdmin = req.headers.cookie && req.headers.cookie.includes('admin=true');
+    if (!isAdmin) {
+        return res.send('Доступ запрещен. <a href="/">На главную</a>');
+    }
+
     const data = getData();
     let photoBase64 = null;
     if (req.file) {
