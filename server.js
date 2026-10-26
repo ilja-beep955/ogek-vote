@@ -10,9 +10,9 @@ const ADMIN_PASSWORD = 'admin123'; // Пароль админа
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 2 * 1024 * 1024 } });
 
-// Инициализация базы данных (добавили users)
+// Инициализация базы данных
 if (!fs.existsSync(DATA_FILE)) {
-    fs.writeFileSync(DATA_FILE, JSON.stringify({ candidates: [], users: {} }));
+    fs.writeFileSync(DATA_FILE, JSON.stringify({ candidates: [], users: {}, voteLog: [] }));
 }
 
 const getData = () => JSON.parse(fs.readFileSync(DATA_FILE));
@@ -21,13 +21,16 @@ const saveData = (data) => fs.writeFileSync(DATA_FILE, JSON.stringify(data));
 // Главная страница
 app.get('/', (req, res) => {
     const data = getData();
+    
+    // Для старых баз данных добавляем пустой лог, если его нет
+    if (!data.voteLog) data.voteLog = [];
+
     const totalVotes = data.candidates.reduce((s, c) => s + c.votes, 0);
     const maxVotes = data.candidates.length ? Math.max(...data.candidates.map(c => c.votes)) : 0;
     
     const cookies = req.headers.cookie || '';
     const isAdmin = cookies.includes('admin=true');
     
-    // Получаем ID пользователя из куки
     const match = cookies.match(/userId=([^;]+)/);
     let userId = match ? match[1] : null;
     if (!userId) {
@@ -35,7 +38,6 @@ app.get('/', (req, res) => {
         res.setHeader('Set-Cookie', `userId=${userId}; Path=/; Max-Age=31536000`);
     }
 
-    // Проверяем, зарегистрирован ли пользователь
     const currentUser = data.users[userId];
     const isRegistered = !!currentUser;
     const hasVoted = currentUser ? currentUser.hasVoted : false;
@@ -44,7 +46,6 @@ app.get('/', (req, res) => {
         const isWinner = c.votes === maxVotes && maxVotes > 0;
         const percent = totalVotes ? Math.round((c.votes / totalVotes) * 100) : 0;
         
-        // Кнопка голосования неактивна, если юзер не зареган или уже голосовал
         let btnHtml = '';
         if (!isRegistered) {
             btnHtml = `<button class="btn-vote" disabled style="background:#888; opacity:0.7;">Сначала зарегистрируйся</button>`;
@@ -72,6 +73,15 @@ app.get('/', (req, res) => {
         </div>`;
     }).join('');
 
+    // Формируем список проголосовавших (только для админа)
+    const voteLogHtml = data.voteLog.map(log => `
+        <tr style="border-bottom: 1px solid rgba(255,255,255,0.1);">
+            <td style="padding: 10px;">${log.voterName} <br><small style="opacity:0.7;">${log.voterGroup}</small></td>
+            <td style="padding: 10px; color: #ffd700; font-weight: bold;">${log.candidateName}</td>
+            <td style="padding: 10px; font-size: 0.85rem; opacity: 0.8;">${new Date(log.time).toLocaleString('ru-RU')}</td>
+        </tr>
+    `).reverse().join(''); // Сначала новые
+
     res.send(`
     <!DOCTYPE html>
     <html lang="ru">
@@ -91,7 +101,6 @@ app.get('/', (req, res) => {
             .stat { background: rgba(255,255,255,0.15); padding: 10px 20px; border-radius: 50px; backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.2); }
             .stat span { color: #ffd700; font-weight: bold; font-size: 1.2rem; }
             
-            /* Блок профиля и регистрации */
             .user-panel { background: rgba(255,255,255,0.15); border-radius: 20px; padding: 20px; margin-bottom: 30px; backdrop-filter: blur(15px); text-align: center; border: 1px solid rgba(255,255,255,0.3); }
             .user-panel h3 { margin-bottom: 15px; }
             .reg-form { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
@@ -100,7 +109,8 @@ app.get('/', (req, res) => {
             .reg-form button { padding: 12px 25px; border: none; border-radius: 10px; background: #ffd700; color: #333; font-weight: bold; cursor: pointer; transition: 0.3s; }
             .reg-form button:hover { transform: scale(1.05); }
 
-            .add-form { background: rgba(255,255,255,0.12); border-radius: 20px; padding: 20px; margin-bottom: 30px; backdrop-filter: blur(15px); border: 1px solid rgba(255,255,255,0.2); }
+            .admin-panels { display: flex; flex-wrap: wrap; gap: 20px; margin-bottom: 30px; }
+            .add-form { background: rgba(255,255,255,0.12); border-radius: 20px; padding: 20px; backdrop-filter: blur(15px); border: 1px solid rgba(255,255,255,0.2); flex: 1; min-width: 300px; }
             .add-form h2 { text-align: center; margin-bottom: 15px; }
             .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px,1fr)); gap: 10px; margin-bottom: 10px; }
             input[type=text], input[type=file] { width: 100%; padding: 12px; border-radius: 10px; border: 2px solid rgba(255,255,255,0.3); background: rgba(255,255,255,0.15); color: #fff; outline: none; }
@@ -108,6 +118,11 @@ app.get('/', (req, res) => {
             .btn { padding: 14px 25px; border: none; border-radius: 10px; font-weight: bold; cursor: pointer; transition: 0.3s; text-transform: uppercase; font-size: 1rem; }
             .btn-primary { background: linear-gradient(135deg,#ffd700,#ff8c00); color: #333; width: 100%; }
             
+            .log-panel { background: rgba(0,0,0,0.4); border-radius: 20px; padding: 20px; backdrop-filter: blur(15px); border: 1px solid rgba(255,255,255,0.2); flex: 1; min-width: 300px; max-height: 400px; overflow-y: auto; }
+            .log-panel h2 { text-align: center; margin-bottom: 15px; color: #ffd700; }
+            .log-table { width: 100%; text-align: left; border-collapse: collapse; }
+            .log-table th { padding: 10px; border-bottom: 2px solid rgba(255,255,255,0.3); opacity: 0.8; }
+
             .candidates { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px,1fr)); gap: 20px; }
             .card { background: rgba(255,255,255,0.12); border-radius: 20px; padding: 20px; text-align: center; backdrop-filter: blur(15px); border: 1px solid rgba(255,255,255,0.2); position: relative; transition: 0.3s; }
             .card.winner { border: 3px solid #ffd700; box-shadow: 0 0 30px rgba(255,215,0,0.6); }
@@ -140,7 +155,6 @@ app.get('/', (req, res) => {
                 <div class="stat">🗳️ Всего голосов: <span>${totalVotes}</span></div>
             </div>
 
-            <!-- Панель пользователя -->
             ${!isAdmin ? `
             <div class="user-panel">
                 ${isRegistered 
@@ -157,18 +171,37 @@ app.get('/', (req, res) => {
             </div>
             ` : ''}
             
-            <!-- Панель Админа -->
             ${isAdmin ? `
-            <div class="add-form">
-                <h2>➕ Добавить кандидата (Админ)</h2>
-                <form method="POST" action="/add" enctype="multipart/form-data">
-                    <div class="form-grid">
-                        <input type="text" name="name" placeholder="ФИО кандидата" required>
-                        <input type="text" name="group" placeholder="Группа (ИС-21)" required>
-                        <input type="file" name="photo" accept="image/*">
-                    </div>
-                    <button type="submit" class="btn btn-primary">🚀 Добавить</button>
-                </form>
+            <div class="admin-panels">
+                <div class="add-form">
+                    <h2>➕ Добавить кандидата</h2>
+                    <form method="POST" action="/add" enctype="multipart/form-data">
+                        <div class="form-grid">
+                            <input type="text" name="name" placeholder="ФИО кандидата" required>
+                            <input type="text" name="group" placeholder="Группа (ИС-21)" required>
+                            <input type="file" name="photo" accept="image/*">
+                        </div>
+                        <button type="submit" class="btn btn-primary">🚀 Добавить</button>
+                    </form>
+                </div>
+
+                <div class="log-panel">
+                    <h2>📋 Кто за кого проголосовал</h2>
+                    ${data.voteLog.length > 0 ? `
+                    <table class="log-table">
+                        <thead>
+                            <tr>
+                                <th>Кто (Имя/Группа)</th>
+                                <th>За кого</th>
+                                <th>Время</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${voteLogHtml}
+                        </tbody>
+                    </table>
+                    ` : '<p style="text-align:center; opacity:0.7;">Пока нет голосов.</p>'}
+                </div>
             </div>
             ` : ''}
 
@@ -234,7 +267,16 @@ app.post('/vote', express.urlencoded({ extended: true }), (req, res) => {
     const candidate = data.candidates.find(c => c.id === id);
     if (candidate) {
         candidate.votes++;
-        currentUser.hasVoted = true; // Блокируем голосование навсегда
+        currentUser.hasVoted = true;
+        
+        // Записываем в лог
+        data.voteLog.push({
+            voterName: currentUser.name,
+            voterGroup: currentUser.group,
+            candidateName: candidate.name,
+            time: Date.now()
+        });
+
         saveData(data);
     }
     res.redirect('/?msg=' + encodeURIComponent('✅ Голос засчитан!'));
