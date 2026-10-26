@@ -6,7 +6,7 @@ const crypto = require('crypto');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const DATA_FILE = 'data.json';
-const ADMIN_PASSWORD = 'admin123'; // Пароль админа
+const ADMIN_PASSWORD = 'admin123'; // Твой пароль для входа в админку
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 2 * 1024 * 1024 } });
 
@@ -18,7 +18,7 @@ if (!fs.existsSync(DATA_FILE)) {
 const getData = () => JSON.parse(fs.readFileSync(DATA_FILE));
 const saveData = (data) => fs.writeFileSync(DATA_FILE, JSON.stringify(data));
 
-// Главная страница
+// --- ГЛАВНАЯ СТРАНИЦА (ДЛЯ ВСЕХ) ---
 app.get('/', (req, res) => {
     const data = getData();
     if (!data.voteLog) data.voteLog = [];
@@ -27,31 +27,62 @@ app.get('/', (req, res) => {
     const maxVotes = data.candidates.length ? Math.max(...data.candidates.map(c => c.votes)) : 0;
     
     const cookies = req.headers.cookie || '';
-    // ЖЕЛЕЗОБЕТОННАЯ ПРОВЕРКА АДМИНА
-    const isAdmin = /(?:^|;\s*)admin=true/.test(cookies);
-    
     const match = cookies.match(/userId=([^;]+)/);
     let userId = match ? match[1] : null;
+    
+    // Если куки нет, создаем её
     if (!userId) {
         userId = crypto.randomBytes(16).toString('hex');
         res.setHeader('Set-Cookie', `userId=${userId}; Path=/; Max-Age=31536000`);
     }
 
+    // Проверяем, зарегистрирован ли этот пользователь
     const currentUser = data.users[userId];
     const isRegistered = !!currentUser;
     const hasVoted = currentUser ? currentUser.hasVoted : false;
 
+    // Если НЕ зарегистрирован — показываем ТОЛЬКО экран регистрации
+    if (!isRegistered) {
+        return res.send(`
+        <!DOCTYPE html>
+        <html lang="ru">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Регистрация - Голосование ОГАЭК</title>
+            <style>
+                body { font-family: 'Segoe UI', sans-serif; background: linear-gradient(135deg, #667eea, #764ba2); height: 100vh; display: flex; align-items: center; justify-content: center; color: #fff; margin: 0; }
+                .box { background: rgba(255,255,255,0.15); padding: 40px; border-radius: 20px; backdrop-filter: blur(15px); text-align: center; width: 90%; max-width: 400px; box-shadow: 0 10px 30px rgba(0,0,0,0.3); }
+                h1 { font-size: 1.8rem; margin-bottom: 10px; background: linear-gradient(90deg,#ffd700,#fff); -webkit-background-clip:text; -webkit-text-fill-color:transparent; }
+                p { margin-bottom: 25px; opacity: 0.9; font-size: 1rem; }
+                input { width: 100%; padding: 15px; margin-bottom: 15px; border-radius: 10px; border: 2px solid rgba(255,255,255,0.3); background: rgba(255,255,255,0.2); color: #fff; font-size: 1rem; box-sizing: border-box; outline: none; }
+                input::placeholder { color: rgba(255,255,255,0.6); }
+                button { width: 100%; padding: 15px; border: none; border-radius: 10px; background: #ffd700; color: #333; font-weight: bold; font-size: 1.1rem; cursor: pointer; transition: 0.3s; text-transform: uppercase; }
+                button:hover { transform: translateY(-2px); box-shadow: 0 5px 15px rgba(255,215,0,0.4); }
+            </style>
+        </head>
+        <body>
+            <div class="box">
+                <h1>👑 Выборы Старосты</h1>
+                <p>Чтобы проголосовать, введи свои реальные данные.</p>
+                <form method="POST" action="/register">
+                    <input type="text" name="name" placeholder="Твое Имя и Фамилия" required>
+                    <input type="text" name="group" placeholder="Твоя Группа (например, ИС-21)" required>
+                    <button type="submit">Зарегистрироваться</button>
+                </form>
+            </div>
+        </body>
+        </html>
+        `);
+    }
+
+    // --- ЕСЛИ ЗАРЕГИСТРИРОВАН, ПОКАЗЫВАЕМ САЙТ ---
     const candidatesHtml = data.candidates.sort((a, b) => b.votes - a.votes).map(c => {
         const isWinner = c.votes === maxVotes && maxVotes > 0;
         const percent = totalVotes ? Math.round((c.votes / totalVotes) * 100) : 0;
         
         let btnHtml = '';
-        // Если это админ, он видит просто статистику, кнопок голосования ему не надо
-        if (isAdmin) {
-            btnHtml = `<div style="text-align:center; opacity:0.6; font-size:0.9rem; margin-top:10px;">(Режим админа)</div>`;
-        } else if (!isRegistered) {
-            btnHtml = `<button class="btn-vote" disabled style="background:#888; opacity:0.7;">Сначала зарегистрируйся</button>`;
-        } else if (hasVoted) {
+        if (hasVoted) {
             btnHtml = `<button class="btn-vote" disabled>✓ Голос отдан</button>`;
         } else {
             btnHtml = `
@@ -75,15 +106,6 @@ app.get('/', (req, res) => {
         </div>`;
     }).join('');
 
-    // Список проголосовавших (только для админа)
-    const voteLogHtml = data.voteLog.map(log => `
-        <tr style="border-bottom: 1px solid rgba(255,255,255,0.1);">
-            <td style="padding: 10px;">${log.voterName} <br><small style="opacity:0.7;">${log.voterGroup}</small></td>
-            <td style="padding: 10px; color: #ffd700; font-weight: bold;">${log.candidateName}</td>
-            <td style="padding: 10px; font-size: 0.85rem; opacity: 0.8;">${new Date(log.time).toLocaleString('ru-RU')}</td>
-        </tr>
-    `).reverse().join(''); 
-
     res.send(`
     <!DOCTYPE html>
     <html lang="ru">
@@ -104,26 +126,7 @@ app.get('/', (req, res) => {
             .stat span { color: #ffd700; font-weight: bold; font-size: 1.2rem; }
             
             .user-panel { background: rgba(255,255,255,0.15); border-radius: 20px; padding: 20px; margin-bottom: 30px; backdrop-filter: blur(15px); text-align: center; border: 1px solid rgba(255,255,255,0.3); }
-            .user-panel h3 { margin-bottom: 15px; }
-            .reg-form { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
-            .reg-form input { padding: 12px; border-radius: 10px; border: 2px solid rgba(255,255,255,0.3); background: rgba(255,255,255,0.15); color: #fff; outline: none; }
-            .reg-form input::placeholder { color: rgba(255,255,255,0.7); }
-            .reg-form button { padding: 12px 25px; border: none; border-radius: 10px; background: #ffd700; color: #333; font-weight: bold; cursor: pointer; transition: 0.3s; }
-            .reg-form button:hover { transform: scale(1.05); }
-
-            .admin-panels { display: flex; flex-wrap: wrap; gap: 20px; margin-bottom: 30px; }
-            .add-form { background: rgba(255,255,255,0.12); border-radius: 20px; padding: 20px; backdrop-filter: blur(15px); border: 1px solid rgba(255,255,255,0.2); flex: 1; min-width: 300px; }
-            .add-form h2 { text-align: center; margin-bottom: 15px; }
-            .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px,1fr)); gap: 10px; margin-bottom: 10px; }
-            input[type=text], input[type=file] { width: 100%; padding: 12px; border-radius: 10px; border: 2px solid rgba(255,255,255,0.3); background: rgba(255,255,255,0.15); color: #fff; outline: none; }
-            input[type=file]::file-selector-button { background: #ffd700; color: #333; border: none; padding: 5px 10px; border-radius: 5px; cursor: pointer; font-weight: bold; }
-            .btn { padding: 14px 25px; border: none; border-radius: 10px; font-weight: bold; cursor: pointer; transition: 0.3s; text-transform: uppercase; font-size: 1rem; }
-            .btn-primary { background: linear-gradient(135deg,#ffd700,#ff8c00); color: #333; width: 100%; }
-            
-            .log-panel { background: rgba(0,0,0,0.4); border-radius: 20px; padding: 20px; backdrop-filter: blur(15px); border: 1px solid rgba(255,255,255,0.2); flex: 1; min-width: 300px; max-height: 400px; overflow-y: auto; }
-            .log-panel h2 { text-align: center; margin-bottom: 15px; color: #ffd700; }
-            .log-table { width: 100%; text-align: left; border-collapse: collapse; }
-            .log-table th { padding: 10px; border-bottom: 2px solid rgba(255,255,255,0.3); opacity: 0.8; }
+            .user-panel h3 { margin-bottom: 10px; }
 
             .candidates { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px,1fr)); gap: 20px; }
             .card { background: rgba(255,255,255,0.12); border-radius: 20px; padding: 20px; text-align: center; backdrop-filter: blur(15px); border: 1px solid rgba(255,255,255,0.2); position: relative; transition: 0.3s; }
@@ -143,78 +146,25 @@ app.get('/', (req, res) => {
             .btn-vote:disabled { background: #666; cursor: not-allowed; }
             .toast { position: fixed; top: 20px; right: 20px; padding: 15px 25px; background: #00c853; border-radius: 10px; font-weight: bold; box-shadow: 0 5px 20px rgba(0,0,0,0.3); transform: translateX(200%); transition: 0.4s; z-index: 1000; }
             .toast.show { transform: translateX(0); }
-            .admin-link { display: block; text-align: center; margin-top: 40px; color: rgba(255,255,255,0.5); text-decoration: none; font-size: 0.9rem; cursor: pointer; }
-            .admin-link:hover { color: #fff; }
         </style>
     </head>
     <body>
         <div class="container">
             <h1>👑 Лучшая Староста ОГАЭК 👑</h1>
-            <p class="subtitle">Голосуй за самую крутую старосту!</p>
             
+            <div class="user-panel">
+                <h3>👋 Привет, ${currentUser.name} (${currentUser.group})!</h3>
+                <p>${hasVoted ? 'Ты уже сделал свой выбор. Спасибо за голос!' : 'Выбери лучшего кандидата и нажми «Голосовать». Голос можно отдать только один раз!'}</p>
+            </div>
+
             <div class="stats">
                 <div class="stat">👥 Кандидатов: <span>${data.candidates.length}</span></div>
                 <div class="stat">🗳️ Всего голосов: <span>${totalVotes}</span></div>
             </div>
 
-            <!-- Панель обычного пользователя (только для не-админов) -->
-            ${!isAdmin ? `
-            <div class="user-panel">
-                ${isRegistered 
-                    ? `<h3>👋 Привет, ${currentUser.name} (${currentUser.group})!</h3> 
-                       <p style="opacity:0.8;">${hasVoted ? 'Ты уже сделал свой выбор. Спасибо за голос!' : 'Выбери лучшего кандидата и нажми «Голосовать». Голос можно отдать только один раз!'}</p>`
-                    : `<h3>📝 Регистрация для голосования</h3>
-                       <p style="margin-bottom:15px; opacity:0.9;">Введи свои данные, чтобы система засчитала твой голос.</p>
-                       <form method="POST" action="/register" class="reg-form">
-                           <input type="text" name="name" placeholder="Твое Имя и Фамилия" required>
-                           <input type="text" name="group" placeholder="Твоя Группа" required>
-                           <button type="submit">Зарегистрироваться</button>
-                       </form>`
-                }
-            </div>
-            ` : ''}
-            
-            <!-- Панель Админа -->
-            ${isAdmin ? `
-            <div class="admin-panels">
-                <div class="add-form">
-                    <h2>➕ Добавить кандидата</h2>
-                    <form method="POST" action="/add" enctype="multipart/form-data">
-                        <div class="form-grid">
-                            <input type="text" name="name" placeholder="ФИО кандидата" required>
-                            <input type="text" name="group" placeholder="Группа (ИС-21)" required>
-                            <input type="file" name="photo" accept="image/*">
-                        </div>
-                        <button type="submit" class="btn btn-primary">🚀 Добавить</button>
-                    </form>
-                </div>
-
-                <div class="log-panel">
-                    <h2>📋 Кто за кого проголосовал</h2>
-                    ${data.voteLog.length > 0 ? `
-                    <table class="log-table">
-                        <thead>
-                            <tr>
-                                <th>Кто (Имя/Группа)</th>
-                                <th>За кого</th>
-                                <th>Время</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            ${voteLogHtml}
-                        </tbody>
-                    </table>
-                    ` : '<p style="text-align:center; opacity:0.7;">Пока нет голосов.</p>'}
-                </div>
-            </div>
-            ` : ''}
-
             <div class="candidates">
                 ${candidatesHtml || '<div class="empty" style="grid-column:1/-1; text-align:center; padding:50px;">😴 Пока никого нет. Ждем кандидатов!</div>'}
             </div>
-            
-            <!-- Кнопка входа для админа (только для обычных юзеров) -->
-            ${!isAdmin ? `<a href="/login" class="admin-link">🔒 Вход для админа</a>` : ''}
         </div>
         <script>
             const params = new URLSearchParams(window.location.search);
@@ -233,14 +183,14 @@ app.get('/', (req, res) => {
     `);
 });
 
-// Регистрация пользователя
+// --- РЕГИСТРАЦИЯ ---
 app.post('/register', express.urlencoded({ extended: true }), (req, res) => {
     const data = getData();
     const cookies = req.headers.cookie || '';
     const match = cookies.match(/userId=([^;]+)/);
-    const userId = match ? match[1] : null;
+    let userId = match ? match[1] : null;
     
-    if (!userId) return res.redirect('/?msg=Ошибка сессии. Попробуйте обновить страницу.');
+    if (!userId) return res.redirect('/');
 
     data.users[userId] = {
         name: req.body.name.trim(),
@@ -248,32 +198,25 @@ app.post('/register', express.urlencoded({ extended: true }), (req, res) => {
         hasVoted: false
     };
     saveData(data);
-    res.redirect('/?msg=' + encodeURIComponent('✅ Регистрация успешна!'));
+    res.redirect('/');
 });
 
-// Голосование (только для не-админов)
+// --- ГОЛОСОВАНИЕ ---
 app.post('/vote', express.urlencoded({ extended: true }), (req, res) => {
     const data = getData();
     const id = req.body.id;
     const cookies = req.headers.cookie || '';
-    
-    // Дополнительная защита: админ не может голосовать
-    if (/(?:^|;\s*)admin=true/.test(cookies)) {
-        return res.redirect('/?msg=' + encodeURIComponent('⚠️ Админ не может голосовать!'));
-    }
-
     const match = cookies.match(/userId=([^;]+)/);
     const userId = match ? match[1] : null;
     
     if (!userId || !data.users[userId]) {
-        return res.redirect('/?msg=' + encodeURIComponent('⚠️ Сначала зарегистрируйтесь!'));
+        return res.redirect('/');
     }
 
     const currentUser = data.users[userId];
 
-    // Защита от повторного голосования
     if (currentUser.hasVoted) {
-        return res.redirect('/?msg=' + encodeURIComponent('⚠️ Вы уже голосовали! Можно только один раз.'));
+        return res.redirect('/?msg=' + encodeURIComponent('⚠️ Вы уже голосовали!'));
     }
     
     const candidate = data.candidates.find(c => c.id === id);
@@ -281,7 +224,6 @@ app.post('/vote', express.urlencoded({ extended: true }), (req, res) => {
         candidate.votes++;
         currentUser.hasVoted = true;
         
-        // Записываем в лог для админа
         if (!data.voteLog) data.voteLog = [];
         data.voteLog.push({
             voterName: currentUser.name,
@@ -295,36 +237,137 @@ app.post('/vote', express.urlencoded({ extended: true }), (req, res) => {
     res.redirect('/?msg=' + encodeURIComponent('✅ Голос засчитан!'));
 });
 
-// --- АДМИНКА ---
-app.get('/login', (req, res) => {
+// --- СТРАНИЦА ВХОДА В АДМИНКУ ---
+app.get('/admin', (req, res) => {
+    const cookies = req.headers.cookie || '';
+    const isAdmin = /(?:^|;\s*)admin=true/.test(cookies);
+
+    if (!isAdmin) {
+        // Если не админ, показываем форму ввода пароля
+        return res.send(`
+        <!DOCTYPE html>
+        <html lang="ru">
+        <head>
+            <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Вход в Админку</title>
+            <style>
+                body { font-family: 'Segoe UI', sans-serif; background: #1a1a2e; height: 100vh; display: flex; align-items: center; justify-content: center; color: #fff; margin: 0; }
+                .box { background: rgba(255,255,255,0.1); padding: 40px; border-radius: 20px; text-align: center; width: 300px; border: 1px solid rgba(255,255,255,0.2); }
+                input { width: 100%; padding: 12px; margin-bottom: 15px; border-radius: 8px; border: none; background: rgba(255,255,255,0.2); color: #fff; box-sizing: border-box; outline: none; }
+                button { width: 100%; padding: 12px; border: none; border-radius: 8px; background: #ffd700; color: #333; font-weight: bold; cursor: pointer; }
+                a { color: #aaa; text-decoration: none; display: block; margin-top: 15px; font-size: 0.9rem; }
+            </style>
+        </head>
+        <body>
+            <div class="box">
+                <h2>🔒 Админ-панель</h2>
+                <p style="font-size:0.9rem; opacity:0.8; margin-bottom:15px;">Введите пароль для доступа</p>
+                <form method="POST" action="/admin">
+                    <input type="password" name="password" placeholder="Пароль" required>
+                    <button type="submit">Войти</button>
+                </form>
+                <a href="/">← На главную</a>
+            </div>
+        </body>
+        </html>
+        `);
+    }
+
+    // --- ЕСЛИ ПАРОЛЬ ВЕРНЫЙ, ПОКАЗЫВАЕМ АДМИНКУ ---
+    const data = getData();
+    if (!data.voteLog) data.voteLog = [];
+
+    const candidatesHtml = data.candidates.map(c => `
+        <div style="background: rgba(255,255,255,0.1); padding: 15px; border-radius: 10px; margin-bottom: 10px; display: flex; align-items: center; gap: 15px;">
+            <div style="width: 50px; height: 50px; border-radius: 50%; background: #444; overflow: hidden; flex-shrink: 0;">
+                ${c.photo ? `<img src="${c.photo}" style="width:100%; height:100%; object-fit:cover;">` : ''}
+            </div>
+            <div>
+                <div style="font-weight: bold;">${c.name}</div>
+                <div style="font-size: 0.9rem; color: #ffd700;">📚 ${c.group} | Голосов: ${c.votes}</div>
+            </div>
+        </div>
+    `).join('');
+
+    const voteLogHtml = data.voteLog.map(log => `
+        <tr style="border-bottom: 1px solid rgba(255,255,255,0.1);">
+            <td style="padding: 10px;">${log.voterName} <br><small style="opacity:0.7;">${log.voterGroup}</small></td>
+            <td style="padding: 10px; color: #ffd700; font-weight: bold;">${log.candidateName}</td>
+            <td style="padding: 10px; font-size: 0.85rem; opacity: 0.8;">${new Date(log.time).toLocaleString('ru-RU')}</td>
+        </tr>
+    `).reverse().join('');
+
     res.send(`
-    <body style="font-family:sans-serif; background:#667eea; height:100vh; display:flex; align-items:center; justify-content:center; color:#fff;">
-        <div style="background:rgba(255,255,255,0.2); padding:40px; border-radius:20px; text-align:center;">
-            <h2>Вход для админа</h2>
-            <form method="POST" action="/login">
-                <input type="password" name="password" placeholder="Пароль" required style="padding:10px; border-radius:5px; border:none; margin-bottom:10px; width:100%;">
-                <button type="submit" style="padding:10px; width:100%; background:#ffd700; border:none; border-radius:5px; font-weight:bold; cursor:pointer;">Войти</button>
-            </form>
-            <a href="/" style="color:#ffd700; display:block; margin-top:15px; text-decoration:none;">На главную</a>
+    <!DOCTYPE html>
+    <html lang="ru">
+    <head>
+        <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Админ-панель</title>
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            body { font-family: 'Segoe UI', sans-serif; background: #1a1a2e; color: #fff; padding: 20px; }
+            .container { max-width: 1200px; margin: 0 auto; }
+            h1 { text-align: center; color: #ffd700; margin-bottom: 30px; }
+            .panels { display: flex; gap: 20px; flex-wrap: wrap; }
+            .panel { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); border-radius: 15px; padding: 20px; flex: 1; min-width: 300px; }
+            .panel h2 { margin-bottom: 15px; font-size: 1.3rem; border-bottom: 1px solid rgba(255,255,255,0.2); padding-bottom: 10px; }
+            input[type=text], input[type=file] { width: 100%; padding: 10px; margin-bottom: 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.2); background: rgba(0,0,0,0.3); color: #fff; outline: none; }
+            button { padding: 12px; width: 100%; border: none; border-radius: 8px; background: #ffd700; color: #333; font-weight: bold; cursor: pointer; }
+            table { width: 100%; text-align: left; border-collapse: collapse; margin-top: 10px; }
+            th { padding: 10px; border-bottom: 2px solid rgba(255,255,255,0.2); opacity: 0.8; }
+            .back-link { display: inline-block; margin-bottom: 20px; color: #aaa; text-decoration: none; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <a href="/" class="back-link">← На главную сайта</a>
+            <h1>👑 Панель Управления Выборами</h1>
+            
+            <div class="panels">
+                <div class="panel">
+                    <h2>➕ Добавить кандидата</h2>
+                    <form method="POST" action="/add" enctype="multipart/form-data">
+                        <input type="text" name="name" placeholder="ФИО кандидата" required>
+                        <input type="text" name="group" placeholder="Группа (ИС-21)" required>
+                        <input type="file" name="photo" accept="image/*">
+                        <button type="submit">Добавить</button>
+                    </form>
+                    
+                    <h2 style="margin-top:30px;">📋 Текущие кандидаты</h2>
+                    <div style="max-height: 300px; overflow-y: auto;">
+                        ${candidatesHtml || '<p style="opacity:0.5;">Нет кандидатов</p>'}
+                    </div>
+                </div>
+
+                <div class="panel">
+                    <h2>🗳️ Кто за кого проголосовал</h2>
+                    ${data.voteLog.length > 0 ? `
+                    <table>
+                        <thead><tr><th>Кто (Имя/Группа)</th><th>За кого</th><th>Время</th></tr></thead>
+                        <tbody>${voteLogHtml}</tbody>
+                    </table>
+                    ` : '<p style="opacity:0.5;">Пока нет голосов.</p>'}
+                </div>
+            </div>
         </div>
     </body>
+    </html>
     `);
 });
 
-app.post('/login', express.urlencoded({ extended: true }), (req, res) => {
+// --- ОБРАБОТКА ВХОДА В АДМИНКУ ---
+app.post('/admin', express.urlencoded({ extended: true }), (req, res) => {
     if (req.body.password === ADMIN_PASSWORD) {
         res.setHeader('Set-Cookie', 'admin=true; Path=/; Max-Age=86400');
-        res.redirect('/');
+        res.redirect('/admin');
     } else {
-        res.send('Неверный пароль. <a href="/login">Назад</a>');
+        res.send('Неверный пароль. <a href="/admin">Назад</a>');
     }
 });
 
-// Добавление кандидата (ТОЛЬКО ДЛЯ АДМИНА)
+// --- ДОБАВЛЕНИЕ КАНДИДАТА ---
 app.post('/add', upload.single('photo'), (req, res) => {
     const cookies = req.headers.cookie || '';
     if (!/(?:^|;\s*)admin=true/.test(cookies)) {
-        return res.status(403).send('Доступ запрещен. <a href="/">На главную</a>');
+        return res.status(403).send('Доступ запрещен.');
     }
 
     const data = getData();
@@ -340,7 +383,7 @@ app.post('/add', upload.single('photo'), (req, res) => {
         votes: 0
     });
     saveData(data);
-    res.redirect('/');
+    res.redirect('/admin');
 });
 
 app.listen(PORT, () => console.log(`Server started on port ${PORT}`));
