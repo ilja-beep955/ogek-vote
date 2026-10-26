@@ -1,17 +1,17 @@
 const express = require('express');
 const multer = require('multer');
 const fs = require('fs');
-const path = require('path');
+const crypto = require('crypto'); // Добавили для генерации ID
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const DATA_FILE = 'data.json';
-const ADMIN_PASSWORD = 'admin123'; // ⚠️ ПАРОЛЬ ДЛЯ ДОБАВЛЕНИЯ (можешь изменить)
+const ADMIN_PASSWORD = 'admin123'; // Пароль для добавления
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 2 * 1024 * 1024 } });
 
 if (!fs.existsSync(DATA_FILE)) {
-    fs.writeFileSync(DATA_FILE, JSON.stringify({ candidates: [], votedIps: [] }));
+    fs.writeFileSync(DATA_FILE, JSON.stringify({ candidates: [], votedUsers: [] }));
 }
 
 const getData = () => JSON.parse(fs.readFileSync(DATA_FILE));
@@ -22,14 +22,22 @@ app.get('/', (req, res) => {
     const data = getData();
     const totalVotes = data.candidates.reduce((s, c) => s + c.votes, 0);
     const maxVotes = data.candidates.length ? Math.max(...data.candidates.map(c => c.votes)) : 0;
-    const userIp = req.ip;
     
-    // Проверяем, ввел ли пользователь пароль (через cookie)
-    const isAdmin = req.headers.cookie && req.headers.cookie.includes('admin=true');
+    // Читаем куки
+    const cookies = req.headers.cookie || '';
+    const isAdmin = cookies.includes('admin=true');
+    
+    // Ищем ID пользователя в куках. Если его нет — генерируем новый.
+    const match = cookies.match(/userId=([^;]+)/);
+    let userId = match ? match[1] : null;
+    if (!userId) {
+        userId = crypto.randomBytes(16).toString('hex');
+        res.setHeader('Set-Cookie', `userId=${userId}; Path=/; Max-Age=31536000`); // Кука на 1 год
+    }
 
     const candidatesHtml = data.candidates.sort((a, b) => b.votes - a.votes).map(c => {
         const isWinner = c.votes === maxVotes && maxVotes > 0;
-        const hasVoted = data.votedIps.includes(`${userIp}_${c.id}`);
+        const hasVoted = data.votedUsers.includes(`${userId}_${c.id}`); // Проверка по куке
         const percent = totalVotes ? Math.round((c.votes / totalVotes) * 100) : 0;
         
         return `
@@ -182,7 +190,7 @@ app.get('/login', (req, res) => {
 // Обработка логина
 app.post('/login', express.urlencoded({ extended: true }), (req, res) => {
     if (req.body.password === ADMIN_PASSWORD) {
-        res.setHeader('Set-Cookie', 'admin=true; Path=/; Max-Age=86400'); // Кука на 24 часа
+        res.setHeader('Set-Cookie', 'admin=true; Path=/; Max-Age=86400');
         res.redirect('/');
     } else {
         res.send('Неверный пароль. <a href="/login">Назад</a>');
@@ -216,16 +224,27 @@ app.post('/add', upload.single('photo'), (req, res) => {
 app.post('/vote', express.urlencoded({ extended: true }), (req, res) => {
     const data = getData();
     const id = req.body.id;
-    const ip = req.ip;
     
-    if (data.votedIps.includes(`${ip}_${id}`)) {
+    // Ищем userId в куках
+    const cookies = req.headers.cookie || '';
+    const match = cookies.match(/userId=([^;]+)/);
+    let userId = match ? match[1] : null;
+    
+    // Если куки нет (человек зашел впервые и сразу нажал голосовать)
+    if (!userId) {
+        userId = Date.now().toString(); // Временный ID
+        res.setHeader('Set-Cookie', `userId=${userId}; Path=/; Max-Age=31536000`);
+    }
+    
+    // Проверяем: голосовал ли этот пользователь (по куке) за этого кандидата
+    if (data.votedUsers.includes(`${userId}_${id}`)) {
         return res.redirect('/?voted=0');
     }
     
     const candidate = data.candidates.find(c => c.id === id);
     if (candidate) {
         candidate.votes++;
-        data.votedIps.push(`${ip}_${id}`);
+        data.votedUsers.push(`${userId}_${id}`); // Запоминаем связку ID_Кандидат
         saveData(data);
     }
     res.redirect('/?voted=1');
