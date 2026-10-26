@@ -17,26 +17,28 @@ if (!fs.existsSync(DATA_FILE)) {
 const getData = () => JSON.parse(fs.readFileSync(DATA_FILE));
 const saveData = (data) => fs.writeFileSync(DATA_FILE, JSON.stringify(data));
 
-// --- ГЛАВНАЯ СТРАНИЦА (ТОЛЬКО ДЛЯ СТУДЕНТОВ) ---
+// ==========================================
+// ГЛАВНАЯ СТРАНИЦА (ТОЛЬКО ДЛЯ СТУДЕНТОВ)
+// ==========================================
 app.get('/', (req, res) => {
     const data = getData();
     
+    // Ищем куку пользователя
     const cookies = req.headers.cookie || '';
     const match = cookies.match(/userId=([^;]+)/);
     let userId = match ? match[1] : null;
     
-    // Если куки нет, создаем
+    // Если куки нет, создаем уникальный ID для этого браузера
     if (!userId) {
         userId = crypto.randomBytes(16).toString('hex');
         res.setHeader('Set-Cookie', `userId=${userId}; Path=/; Max-Age=31536000`);
     }
 
+    // Проверяем, есть ли этот ID в списке зарегистрированных
     const currentUser = data.users[userId];
-    const isRegistered = !!currentUser;
-    const hasVoted = currentUser ? currentUser.hasVoted : false;
-
-    // ЕСЛИ НЕ ЗАРЕГИСТРИРОВАН — ТОЛЬКО ФОРМА РЕГИСТРАЦИИ
-    if (!isRegistered) {
+    
+    // ЕСЛИ НЕ ЗАРЕГИСТРИРОВАН — ПОКАЗЫВАЕМ ТОЛЬКО ФОРМУ
+    if (!currentUser) {
         return res.send(`
         <!DOCTYPE html>
         <html lang="ru">
@@ -70,6 +72,7 @@ app.get('/', (req, res) => {
     }
 
     // ЕСЛИ ЗАРЕГИСТРИРОВАН — ПОКАЗЫВАЕМ КАНДИДАТОВ
+    const hasVoted = currentUser.hasVoted;
     const totalVotes = data.candidates.reduce((s, c) => s + c.votes, 0);
     const maxVotes = data.candidates.length ? Math.max(...data.candidates.map(c => c.votes)) : 0;
 
@@ -152,7 +155,7 @@ app.get('/', (req, res) => {
                 <div class="stat">🗳️ Всего голосов: <span>${totalVotes}</span></div>
             </div>
             <div class="candidates">
-                ${candidatesHtml || '<div class="empty" style="grid-column:1/-1; text-align:center; padding:50px;">😴 Пока никого нет.</div>'}
+                ${candidatesHtml || '<div style="grid-column:1/-1; text-align:center; padding:50px; opacity:0.8;">😴 Пока никого нет. Ждем кандидатов!</div>'}
             </div>
         </div>
         <script>
@@ -172,20 +175,28 @@ app.get('/', (req, res) => {
     `);
 });
 
-// --- РЕГИСТРАЦИЯ ---
+// ==========================================
+// РЕГИСТРАЦИЯ СТУДЕНТА
+// ==========================================
 app.post('/register', express.urlencoded({ extended: true }), (req, res) => {
     const data = getData();
     const cookies = req.headers.cookie || '';
     const match = cookies.match(/userId=([^;]+)/);
     let userId = match ? match[1] : null;
-    if (!userId) return res.redirect('/');
+    
+    if (!userId) {
+        userId = crypto.randomBytes(16).toString('hex');
+        res.setHeader('Set-Cookie', `userId=${userId}; Path=/; Max-Age=31536000`);
+    }
 
     data.users[userId] = { name: req.body.name.trim(), group: req.body.group.trim(), hasVoted: false };
     saveData(data);
     res.redirect('/');
 });
 
-// --- ГОЛОСОВАНИЕ ---
+// ==========================================
+// ГОЛОСОВАНИЕ СТУДЕНТА
+// ==========================================
 app.post('/vote', express.urlencoded({ extended: true }), (req, res) => {
     const data = getData();
     const id = req.body.id;
@@ -194,10 +205,10 @@ app.post('/vote', express.urlencoded({ extended: true }), (req, res) => {
     const userId = match ? match[1] : null;
     
     if (!userId || !data.users[userId]) return res.redirect('/');
-    const currentUser = data.users[userId];
-
-    if (currentUser.hasVoted) return res.redirect('/?msg=' + encodeURIComponent('⚠️ Вы уже голосовали!'));
     
+    const currentUser = data.users[userId];
+    if (currentUser.hasVoted) return res.redirect('/?msg=' + encodeURIComponent('⚠️ Вы уже голосовали!'));
+
     const candidate = data.candidates.find(c => c.id === id);
     if (candidate) {
         candidate.votes++;
@@ -209,13 +220,19 @@ app.post('/vote', express.urlencoded({ extended: true }), (req, res) => {
     res.redirect('/?msg=' + encodeURIComponent('✅ Голос засчитан!'));
 });
 
-// --- СТРАНИЦА АДМИНА ---
+// ==========================================
+// СТРАНИЦА АДМИНА (СРАЗУ ПАРОЛЬ И ПАНЕЛЬ)
+// ==========================================
 app.get('/admin', (req, res) => {
     const cookies = req.headers.cookie || '';
     const isAdmin = /(?:^|;\s*)admin=true/.test(cookies);
 
+    // Если не админ — показываем только форму пароля
     if (!isAdmin) {
         return res.send(`
+        <!DOCTYPE html>
+        <html lang="ru">
+        <head><meta charset="UTF-8"><title>Вход</title></head>
         <body style="font-family:sans-serif; background:#1a1a2e; height:100vh; display:flex; align-items:center; justify-content:center; color:#fff; margin:0;">
             <div style="background:rgba(255,255,255,0.1); padding:40px; border-radius:20px; text-align:center; width:300px;">
                 <h2>🔒 Вход для Админа</h2>
@@ -223,12 +240,14 @@ app.get('/admin', (req, res) => {
                     <input type="password" name="password" placeholder="Пароль" required style="width:100%; padding:12px; margin-bottom:15px; border-radius:8px; border:none; background:rgba(255,255,255,0.2); color:#fff; box-sizing:border-box; outline:none;">
                     <button type="submit" style="width:100%; padding:12px; border:none; border-radius:8px; background:#ffd700; color:#333; font-weight:bold; cursor:pointer;">Войти</button>
                 </form>
-                <a href="/" style="color:#aaa; display:block; margin-top:15px; text-decoration:none; font-size:0.9rem;">← На главную (для студентов)</a>
+                <a href="/" style="color:#aaa; display:block; margin-top:15px; text-decoration:none; font-size:0.9rem;">← Я студент (на главную)</a>
             </div>
         </body>
+        </html>
         `);
     }
 
+    // Если админ — показываем панель управления
     const data = getData();
     if (!data.voteLog) data.voteLog = [];
 
@@ -274,7 +293,7 @@ app.get('/admin', (req, res) => {
     </head>
     <body>
         <div class="container">
-            <a href="/" class="back-link">← На главную (как студент)</a>
+            <a href="/" class="back-link">← Выйти на главную</a>
             <h1>👑 Панель Управления</h1>
             
             <div class="panels">
@@ -309,7 +328,7 @@ app.get('/admin', (req, res) => {
     `);
 });
 
-// --- ОБРАБОТКА ВХОДА В АДМИНКУ ---
+// Обработка ввода пароля на /admin
 app.post('/admin', express.urlencoded({ extended: true }), (req, res) => {
     if (req.body.password === ADMIN_PASSWORD) {
         res.setHeader('Set-Cookie', 'admin=true; Path=/; Max-Age=86400');
@@ -319,7 +338,7 @@ app.post('/admin', express.urlencoded({ extended: true }), (req, res) => {
     }
 });
 
-// --- ДОБАВЛЕНИЕ КАНДИДАТА ---
+// Добавление кандидата
 app.post('/add', upload.single('photo'), (req, res) => {
     const cookies = req.headers.cookie || '';
     if (!/(?:^|;\s*)admin=true/.test(cookies)) return res.status(403).send('Доступ запрещен.');
