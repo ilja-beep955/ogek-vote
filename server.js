@@ -1,12 +1,36 @@
 const express = require('express');
 const multer = require('multer');
 const fs = require('fs');
+const path = require('path');
 const crypto = require('crypto');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const DATA_FILE = 'data.json';
-const ADMIN_PASSWORD = 'admin123'; // Твой пароль
+const DATA_FILE = path.join(__dirname, 'data.json');
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+if (!ADMIN_PASSWORD) throw new Error('Set ADMIN_PASSWORD before starting the server.');
+const adminSessions = new Map();
+const escapeHtml = (value) => String(value).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+const userIdFrom = (req) => {
+    const match = (req.headers.cookie || '').match(/(?:^|;\s*)userId=([a-f0-9]{32})(?:;|$)/);
+    return match ? match[1] : null;
+};
+const isAdminRequest = (req) => {
+    const match = (req.headers.cookie || '').match(/(?:^|;\s*)adminSession=([a-f0-9]{64})(?:;|$)/);
+    if (!match) return false;
+    const expires = adminSessions.get(match[1]);
+    if (!expires || expires <= Date.now()) { adminSessions.delete(match[1]); return false; }
+    return true;
+};
+const validText = value => typeof value === 'string' && value.trim().length > 0 && value.trim().length <= 150;
+app.use((req, res, next) => {
+    if (req.method === 'POST' && req.headers.origin) {
+        try {
+            if (new URL(req.headers.origin).host !== req.headers.host) return res.status(403).send('Invalid origin');
+        } catch { return res.status(403).send('Invalid origin'); }
+    }
+    next();
+});
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 2 * 1024 * 1024 } });
 
@@ -14,8 +38,12 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 2 *
 if (!fs.existsSync(DATA_FILE)) {
     fs.writeFileSync(DATA_FILE, JSON.stringify({ candidates: [], users: {}, voteLog: [] }));
 }
-const getData = () => JSON.parse(fs.readFileSync(DATA_FILE));
-const saveData = (data) => fs.writeFileSync(DATA_FILE, JSON.stringify(data));
+const getData = () => JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+const saveData = (data) => {
+    const temp = DATA_FILE + '.tmp';
+    fs.writeFileSync(temp, JSON.stringify(data));
+    fs.renameSync(temp, DATA_FILE);
+};
 
 // ==========================================
 // ГЛАВНАЯ СТРАНИЦА (ТОЛЬКО ДЛЯ СТУДЕНТОВ)
@@ -24,14 +52,12 @@ app.get('/', (req, res) => {
     const data = getData();
     
     // Ищем куку пользователя
-    const cookies = req.headers.cookie || '';
-    const match = cookies.match(/userId=([^;]+)/);
-    let userId = match ? match[1] : null;
+    let userId = userIdFrom(req);
     
     // Если куки нет, создаем уникальный ID для этого браузера
     if (!userId) {
         userId = crypto.randomBytes(16).toString('hex');
-        res.setHeader('Set-Cookie', `userId=${userId}; Path=/; Max-Age=31536000`);
+        res.cookie('userId', userId, { httpOnly: true, sameSite: 'lax', secure: req.secure, maxAge: 31536000000 });
     }
 
     // Проверяем, есть ли этот ID в списке зарегистрированных
@@ -75,19 +101,18 @@ app.get('/', (req, res) => {
     const hasVoted = currentUser.hasVoted;
     const totalVotes = data.candidates.reduce((s, c) => s + c.votes, 0);
     const maxVotes = data.candidates.length ? Math.max(...data.candidates.map(c => c.votes)) : 0;
-
-    const candidatesHtml = data.candidates.sort((a, b) => b.votes - a.votes).map(c => {
+const candidatesHtml = data.candidates.sort((a, b) => b.votes - a.votes).map(c => {
         const isWinner = c.votes === maxVotes && maxVotes > 0;
         const percent = totalVotes ? Math.round((c.votes / totalVotes) * 100) : 0;
         
         let btnHtml = '';
         if (hasVoted) {
-            btnHtml = `<button class="btn-vote" disabled>✓ Голос отдан</button>`;
+            btnHtml = '<button class="btn-vote" disabled>✓ Голос отдан</button>';
         } else {
             btnHtml = `
             <form method="POST" action="/vote">
-                <input type="hidden" name="id" value="${c.id}">
-                <button type="submit" class="btn-vote">🗳️ Голосовать</button>
+                <input type="hidden" name="id" value="${escapeHtml(c.id)}">
+                <button type="submit" class="btn-vote">🗳 Голосовать</button>
             </form>`;
         }
         
@@ -95,10 +120,10 @@ app.get('/', (req, res) => {
         <div class="card ${isWinner ? 'winner' : ''}">
             ${isWinner ? '<div class="crown">👑</div>' : ''}
             <div class="photo-wrap">
-                ${c.photo ? `<img src="${c.photo}" alt="">` : `<div class="placeholder">👤</div>`}
+                ${c.photo ? `<img src="${escapeHtml(c.photo)}" alt="">` : '<div class="placeholder">👤</div>'}
             </div>
-            <div class="card-name">${c.name}</div>
-            <div class="card-group">📚 ${c.group}</div>
+            <div class="card-name">${escapeHtml(c.name)}</div>
+            <div class="card-group">📚 ${escapeHtml(c.group)}</div>
             <div class="votes">${c.votes} <small>голос(ов)</small></div>
             <div class="progress"><div class="progress-bar" style="width:${percent}%"></div></div>
             ${btnHtml}
@@ -132,7 +157,7 @@ app.get('/', (req, res) => {
             .photo-wrap img { width: 100%; height: 100%; object-fit: cover; }
             .placeholder { font-size: 3rem; opacity: 0.6; }
             .card-name { font-weight: bold; font-size: 1.2rem; margin-bottom: 5px; }
-            .card-group { color: #ffd700; font-size: 1rem; margin-bottom: 15px; font-weight: bold; }
+.card-group { color: #ffd700; font-size: 1rem; margin-bottom: 15px; font-weight: bold; }
             .votes { font-size: 1.8rem; font-weight: 900; color: #ffd700; margin-bottom: 10px; }
             .progress { height: 8px; background: rgba(0,0,0,0.3); border-radius: 10px; overflow: hidden; margin-bottom: 15px; }
             .progress-bar { height: 100%; background: linear-gradient(90deg,#ffd700,#ff8c00); transition: width 0.8s ease; }
@@ -147,12 +172,12 @@ app.get('/', (req, res) => {
         <div class="container">
             <h1>👑 Лучшая Староста ОГАЭК 👑</h1>
             <div class="user-panel">
-                <h3>👋 Привет, ${currentUser.name} (${currentUser.group})!</h3>
+                <h3>👋 Привет, ${escapeHtml(currentUser.name)} (${escapeHtml(currentUser.group)})!</h3>
                 <p>${hasVoted ? 'Ты уже сделал свой выбор. Спасибо за голос!' : 'Выбери лучшего кандидата и нажми «Голосовать».'}</p>
             </div>
             <div class="stats">
                 <div class="stat">👥 Кандидатов: <span>${data.candidates.length}</span></div>
-                <div class="stat">🗳️ Всего голосов: <span>${totalVotes}</span></div>
+                <div class="stat">🗳 Всего голосов: <span>${totalVotes}</span></div>
             </div>
             <div class="candidates">
                 ${candidatesHtml || '<div style="grid-column:1/-1; text-align:center; padding:50px; opacity:0.8;">😴 Пока никого нет. Ждем кандидатов!</div>'}
@@ -163,7 +188,7 @@ app.get('/', (req, res) => {
             if (params.has('msg')) {
                 const toast = document.createElement('div');
                 toast.className = 'toast show';
-                toast.textContent = decodeURIComponent(params.get('msg'));
+                toast.textContent = params.get('msg');
                 toast.style.background = params.get('msg').includes('✅') ? '#00c853' : '#ff9800';
                 document.body.appendChild(toast);
                 setTimeout(() => toast.classList.remove('show'), 3000);
@@ -180,16 +205,16 @@ app.get('/', (req, res) => {
 // ==========================================
 app.post('/register', express.urlencoded({ extended: true }), (req, res) => {
     const data = getData();
-    const cookies = req.headers.cookie || '';
-    const match = cookies.match(/userId=([^;]+)/);
-    let userId = match ? match[1] : null;
+    let userId = userIdFrom(req);
     
     if (!userId) {
         userId = crypto.randomBytes(16).toString('hex');
-        res.setHeader('Set-Cookie', `userId=${userId}; Path=/; Max-Age=31536000`);
+        res.cookie('userId', userId, { httpOnly: true, sameSite: 'lax', secure: req.secure, maxAge: 31536000000 });
     }
 
-    data.users[userId] = { name: req.body.name.trim(), group: req.body.group.trim(), hasVoted: false };
+    if (data.users[userId]) return res.redirect('/');
+    if (!validText(req.body?.name) || !validText(req.body?.group)) return res.status(400).send('Name and group are required (1-150 characters).');
+    data.users[userId] = { name: req.body?.name.trim(), group: req.body?.group.trim(), hasVoted: false };
     saveData(data);
     res.redirect('/');
 });
@@ -199,17 +224,15 @@ app.post('/register', express.urlencoded({ extended: true }), (req, res) => {
 // ==========================================
 app.post('/vote', express.urlencoded({ extended: true }), (req, res) => {
     const data = getData();
-    const id = req.body.id;
-    const cookies = req.headers.cookie || '';
-    const match = cookies.match(/userId=([^;]+)/);
-    const userId = match ? match[1] : null;
+    const id = req.body?.id;
+    const userId = userIdFrom(req);
     
     if (!userId || !data.users[userId]) return res.redirect('/');
     
     const currentUser = data.users[userId];
     if (currentUser.hasVoted) return res.redirect('/?msg=' + encodeURIComponent('⚠️ Вы уже голосовали!'));
-
-    const candidate = data.candidates.find(c => c.id === id);
+const candidate = data.candidates.find(c => c.id === id);
+    if (!candidate) return res.status(404).send('Candidate not found.');
     if (candidate) {
         candidate.votes++;
         currentUser.hasVoted = true;
@@ -224,8 +247,7 @@ app.post('/vote', express.urlencoded({ extended: true }), (req, res) => {
 // СТРАНИЦА АДМИНА (СРАЗУ ПАРОЛЬ И ПАНЕЛЬ)
 // ==========================================
 app.get('/admin', (req, res) => {
-    const cookies = req.headers.cookie || '';
-    const isAdmin = /(?:^|;\s*)admin=true/.test(cookies);
+    const isAdmin = isAdminRequest(req);
 
     // Если не админ — показываем только форму пароля
     if (!isAdmin) {
@@ -254,19 +276,19 @@ app.get('/admin', (req, res) => {
     const candidatesHtml = data.candidates.map(c => `
         <div style="background: rgba(255,255,255,0.1); padding: 15px; border-radius: 10px; margin-bottom: 10px; display: flex; align-items: center; gap: 15px;">
             <div style="width: 50px; height: 50px; border-radius: 50%; background: #444; overflow: hidden; flex-shrink: 0;">
-                ${c.photo ? `<img src="${c.photo}" style="width:100%; height:100%; object-fit:cover;">` : ''}
+                ${c.photo ? `<img src="${escapeHtml(c.photo)}" style="width:100%; height:100%; object-fit:cover;">` : ''}
             </div>
             <div>
-                <div style="font-weight: bold;">${c.name}</div>
-                <div style="font-size: 0.9rem; color: #ffd700;">📚 ${c.group} | Голосов: ${c.votes}</div>
+                <div style="font-weight: bold;">${escapeHtml(c.name)}</div>
+                <div style="font-size: 0.9rem; color: #ffd700;">📚 ${escapeHtml(c.group)} | Голосов: ${c.votes}</div>
             </div>
         </div>
     `).join('');
 
     const voteLogHtml = data.voteLog.map(log => `
         <tr style="border-bottom: 1px solid rgba(255,255,255,0.1);">
-            <td style="padding: 10px;">${log.voterName} <br><small style="opacity:0.7;">${log.voterGroup}</small></td>
-            <td style="padding: 10px; color: #ffd700; font-weight: bold;">${log.candidateName}</td>
+            <td style="padding: 10px;">${escapeHtml(log.voterName)} <br><small style="opacity:0.7;">${escapeHtml(log.voterGroup)}</small></td>
+            <td style="padding: 10px; color: #ffd700; font-weight: bold;">${escapeHtml(log.candidateName)}</td>
             <td style="padding: 10px; font-size: 0.85rem; opacity: 0.8;">${new Date(log.time).toLocaleString('ru-RU')}</td>
         </tr>
     `).reverse().join('');
@@ -283,7 +305,8 @@ app.get('/admin', (req, res) => {
             h1 { text-align: center; color: #ffd700; margin-bottom: 30px; }
             .panels { display: flex; gap: 20px; flex-wrap: wrap; }
             .panel { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); border-radius: 15px; padding: 20px; flex: 1; min-width: 300px; }
-            .panel h2 { margin-bottom: 15px; font-size: 1.3rem; border-bottom: 1px solid rgba(255,255,255,0.2); padding-bottom: 10px; }
+            .panel h2
+{ margin-bottom: 15px; font-size: 1.3rem; border-bottom: 1px solid rgba(255,255,255,0.2); padding-bottom: 10px; }
             input[type=text], input[type=file] { width: 100%; padding: 10px; margin-bottom: 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.2); background: rgba(0,0,0,0.3); color: #fff; outline: none; }
             button { padding: 12px; width: 100%; border: none; border-radius: 8px; background: #ffd700; color: #333; font-weight: bold; cursor: pointer; }
             table { width: 100%; text-align: left; border-collapse: collapse; margin-top: 10px; }
@@ -302,7 +325,7 @@ app.get('/admin', (req, res) => {
                     <form method="POST" action="/add" enctype="multipart/form-data">
                         <input type="text" name="name" placeholder="ФИО кандидата" required>
                         <input type="text" name="group" placeholder="Группа (ИС-21)" required>
-                        <input type="file" name="photo" accept="image/*">
+                        <input type="file" name="photo" accept="image/png,image/jpeg">
                         <button type="submit">Добавить</button>
                     </form>
                     
@@ -313,7 +336,7 @@ app.get('/admin', (req, res) => {
                 </div>
 
                 <div class="panel">
-                    <h2>🗳️ Кто за кого проголосовал</h2>
+                    <h2>🗳 Кто за кого проголосовал</h2>
                     ${data.voteLog.length > 0 ? `
                     <table>
                         <thead><tr><th>Кто (Имя/Группа)</th><th>За кого</th><th>Время</th></tr></thead>
@@ -330,8 +353,13 @@ app.get('/admin', (req, res) => {
 
 // Обработка ввода пароля на /admin
 app.post('/admin', express.urlencoded({ extended: true }), (req, res) => {
-    if (req.body.password === ADMIN_PASSWORD) {
-        res.setHeader('Set-Cookie', 'admin=true; Path=/; Max-Age=86400');
+    if (req.body?.password === ADMIN_PASSWORD) {
+        for (const [token, expires] of adminSessions) {
+            if (expires <= Date.now()) adminSessions.delete(token);
+        }
+        const token = crypto.randomBytes(32).toString('hex');
+        adminSessions.set(token, Date.now() + 86400000);
+        res.cookie('adminSession', token, { httpOnly: true, sameSite: 'strict', secure: req.secure, maxAge: 86400000 });
         res.redirect('/admin');
     } else {
         res.send('Неверный пароль. <a href="/admin">Назад</a>');
@@ -339,17 +367,32 @@ app.post('/admin', express.urlencoded({ extended: true }), (req, res) => {
 });
 
 // Добавление кандидата
-app.post('/add', upload.single('photo'), (req, res) => {
-    const cookies = req.headers.cookie || '';
-    if (!/(?:^|;\s*)admin=true/.test(cookies)) return res.status(403).send('Доступ запрещен.');
+app.post('/add', (req, res, next) => {
+    if (!isAdminRequest(req)) return res.status(403).send('Доступ запрещен.');
+    next();
+}, upload.single('photo'), (req, res) => {
+    if (!validText(req.body?.name) || !validText(req.body?.group)) return res.status(400).send('Name and group are required (1-150 characters).');
+    if (req.file) {
+        const b = req.file.buffer;
+        const png = b.length >= 8 && b.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10]));
+        const jpeg = b.length >= 3 && b[0] === 255 && b[1] === 216 && b[2] === 255;
+        if (!((png && req.file.mimetype === 'image/png') || (jpeg && req.file.mimetype === 'image/jpeg'))) return res.status(400).send('Use a PNG or JPEG image.');
+    }
 
     const data = getData();
     let photoBase64 = null;
     if (req.file) photoBase64 = `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`;
     
-    data.candidates.push({ id: Date.now().toString(), name: req.body.name.trim(), group: req.body.group.trim(), photo: photoBase64, votes: 0 });
+    data.candidates.push({ id: crypto.randomBytes(16).toString('hex'), name: req.body?.name.trim(), group: req.body?.group.trim(), photo: photoBase64, votes: 0 });
     saveData(data);
     res.redirect('/admin');
+});
+
+app.use((err, req, res, next) => {
+    if (err instanceof multer.MulterError) return res.status(400).send('Upload rejected: maximum image size is 2 MB.');
+    if (err.status === 400 || err.status === 413 || err.status === 415) return res.status(err.status).send('Invalid request body.');
+    console.error(err);
+    res.status(500).send('Internal server error.');
 });
 
 app.listen(PORT, () => console.log(`Server started on port ${PORT}`));
